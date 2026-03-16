@@ -37,7 +37,7 @@ if [ $USE_MEGATRON -eq 1 ]; then
     echo "Notice that TransformerEngine installation can take very long time, please be patient"
     pip install "onnxscript==0.3.1"
     NVTE_FRAMEWORK=pytorch pip3 install --no-deps git+https://github.com/NVIDIA/TransformerEngine.git@v2.6
-    pip3 install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.13.1
+    pip3 install --no-deps git+https://github.com/NVIDIA/Megatron-LM.git@core_v0.14.0
 fi
 
 
