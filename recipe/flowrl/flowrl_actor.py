@@ -21,6 +21,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id
+from verl.utils.moe_metrics import MoEMetricsCollector, compute_moe_metrics_from_model_output
 from verl.utils.profiler import GPUMemoryLogger
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import prepare_dynamic_batch
@@ -63,14 +64,68 @@ class FlowRLActor(DataParallelPPOActor):
         super().__init__(config, *args, **kwargs)
         # FlowRL hyperparameters (hardcoded as per paper)
         self.flowrl_beta_coef = 15.0  # β coefficient for reward scaling in flowrl loss
+        
+        # MoE metrics collection configuration
+        # First check if user explicitly enabled/disabled MoE metrics collection
+        user_collect_moe_metrics = getattr(config, "collect_moe_metrics", None)
+        
+        # Auto-detect if the model is a MoE model by checking model config
+        model_config = getattr(self.actor_module, "config", None)
+        if model_config is None:
+            # Try to get config from wrapped module (for FSDP)
+            wrapped_module = getattr(self.actor_module, "_fsdp_wrapped_module", self.actor_module)
+            wrapped_module = getattr(wrapped_module, "module", wrapped_module)
+            model_config = getattr(wrapped_module, "config", None)
+        
+        # Detect MoE model: check for num_experts_per_tok or num_local_experts
+        self.is_moe_model = False
+        self.moe_top_k = getattr(config, "moe_top_k", 8)  # Default top-k
+        
+        if model_config is not None:
+            # Check various MoE indicators in config
+            if hasattr(model_config, "num_experts_per_tok") and model_config.num_experts_per_tok is not None:
+                self.is_moe_model = True
+                self.moe_top_k = model_config.num_experts_per_tok
+            elif hasattr(model_config, "num_local_experts") and model_config.num_local_experts is not None:
+                self.is_moe_model = True
+            elif hasattr(model_config, "n_routed_experts") and model_config.n_routed_experts is not None:
+                self.is_moe_model = True
+            # Check model type for known MoE architectures
+            model_type = getattr(model_config, "model_type", "")
+            if "moe" in model_type.lower() or "mixtral" in model_type.lower():
+                self.is_moe_model = True
+        
+        # Determine final collect_moe_metrics setting
+        if user_collect_moe_metrics is not None:
+            # User explicitly set the config
+            self.collect_moe_metrics = user_collect_moe_metrics and self.is_moe_model
+        else:
+            # Auto-detect: enable only for MoE models
+            self.collect_moe_metrics = self.is_moe_model
+        
+        # Initialize MoE metrics collector only if needed
+        if self.collect_moe_metrics:
+            self.moe_metrics_collector = MoEMetricsCollector(top_k=self.moe_top_k)
+            if torch.distributed.get_rank() == 0:
+                print(f"[FlowRL] MoE model detected. Metrics collection enabled with top_k={self.moe_top_k}")
+        else:
+            self.moe_metrics_collector = None
+            if torch.distributed.get_rank() == 0:
+                if self.is_moe_model:
+                    print("[FlowRL] MoE model detected but metrics collection disabled by config")
+                else:
+                    print("[FlowRL] Dense model detected. MoE metrics collection disabled")
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False, return_log_z=False
+        self, micro_batch, temperature, calculate_entropy=False, return_log_z=False, collect_moe_metrics=False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            log_z (optional): # (bs,) if return_log_z=True
+            
+        If collect_moe_metrics is True and model is MoE, also collects router logits for MoE metrics.
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -87,6 +142,10 @@ class FlowRLActor(DataParallelPPOActor):
             entropy = None
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
+
+            # Determine if we need to output router logits for MoE metrics
+            # Only enable for MoE models with metrics collection enabled
+            output_router_logits = collect_moe_metrics and self.collect_moe_metrics and self.is_moe_model
 
             if self.use_remove_padding:
                 input_ids_rmpad, indices, cu_seqlens, *_ = unpad_input(
@@ -147,6 +206,10 @@ class FlowRLActor(DataParallelPPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
+                
+                # Enable router logits output for MoE models
+                if output_router_logits:
+                    extra_args["output_router_logits"] = True
 
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,
@@ -157,6 +220,10 @@ class FlowRLActor(DataParallelPPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                
+                # Collect MoE router logits if available
+                if output_router_logits and hasattr(output, "router_logits") and output.router_logits is not None:
+                    self.moe_metrics_collector.add(output.router_logits, attention_mask=None)
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -226,6 +293,10 @@ class FlowRLActor(DataParallelPPOActor):
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
+                
+                # Enable router logits output for MoE models
+                if output_router_logits:
+                    extra_args["output_router_logits"] = True
 
                 output = self.actor_module(
                     input_ids=input_ids,
@@ -236,6 +307,10 @@ class FlowRLActor(DataParallelPPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                
+                # Collect MoE router logits if available
+                if output_router_logits and hasattr(output, "router_logits") and output.router_logits is not None:
+                    self.moe_metrics_collector.add(output.router_logits, attention_mask=attention_mask)
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
@@ -315,6 +390,11 @@ class FlowRLActor(DataParallelPPOActor):
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
         metrics = {}
+        
+        # Reset MoE metrics collector at the start of each update (only for MoE models)
+        if self.collect_moe_metrics and self.moe_metrics_collector is not None:
+            self.moe_metrics_collector.reset()
+        
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
@@ -345,9 +425,10 @@ class FlowRLActor(DataParallelPPOActor):
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
 
-                    # FlowRL: compute log probs and log Z
+                    # FlowRL: compute log probs and log Z, also collect MoE metrics
                     entropy, log_prob, log_z = self._forward_micro_batch(
-                        model_inputs, temperature=temperature, calculate_entropy=False, return_log_z=True
+                        model_inputs, temperature=temperature, calculate_entropy=False, return_log_z=True,
+                        collect_moe_metrics=self.collect_moe_metrics
                     )
 
                     if on_policy:
@@ -428,6 +509,13 @@ class FlowRLActor(DataParallelPPOActor):
                 grad_norm = self._optimizer_step()
                 mini_batch_metrics = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, mini_batch_metrics)
+        
+        # Compute and add MoE metrics after all micro-batches are processed (only for MoE models)
+        if self.collect_moe_metrics and self.moe_metrics_collector is not None:
+            moe_metrics = self.moe_metrics_collector.compute_and_reset()
+            if moe_metrics:
+                metrics.update(moe_metrics)
+        
         self.actor_optimizer.zero_grad()
         return metrics
 

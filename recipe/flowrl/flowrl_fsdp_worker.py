@@ -87,6 +87,8 @@ class FlowRLActorRolloutRefWorker(ActorRolloutRefWorker):
         use_liger=False,
         role="actor",
         enable_activation_offload=False,
+        use_tiled_mlp=False,
+        tiled_mlp_shards=4,
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
@@ -102,6 +104,10 @@ class FlowRLActorRolloutRefWorker(ActorRolloutRefWorker):
         from verl.utils.torch_dtypes import PrecisionType
 
         assert role in ["actor", "ref"]
+
+        # TiledMLP requires FSDP2 for correct gradient computation
+        if use_tiled_mlp and self.config.actor.strategy == "fsdp":
+            raise ValueError("TiledMLP requires FSDP2. Set `actor_rollout_ref.actor.strategy=fsdp2`.")
 
         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = model_path
@@ -492,3 +498,49 @@ class FlowRLActorRolloutRefWorker(ActorRolloutRefWorker):
         self.base_sync_done = True
         self.torch_random_states = get_torch_device().get_rng_state()
         get_torch_device().set_rng_state(self.gen_random_states)
+
+
+# ================================= Async related workers =================================
+class FlowRLAsyncActorRolloutRefWorker(FlowRLActorRolloutRefWorker):
+    """
+    Async version of FlowRLActorRolloutRefWorker for async rollout mode.
+
+    This worker adds async-specific methods required by vLLM/SGLang async server:
+    - get_zeromq_address: Returns ZeroMQ address for vLLM distributed executor
+    - wake_up/sleep: Context switching between rollout and training modes
+    - chat_completion/generate: SGLang-specific async generation methods
+    """
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def wake_up(self):
+        await self.rollout_mode()
+        return True
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def sleep(self):
+        await self.trainer_mode()
+        return True
+
+    # ============================ vLLM related ============================
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    def get_zeromq_address(self):
+        return self.rollout.get_zeromq_address()
+
+    # ============================ SGLang related ============================
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD, blocking=False)
+    async def chat_completion(self, json_request):
+        ret = await self.rollout.chat_completion(json_request)
+        return ret
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD, blocking=False)
+    async def generate(
+        self,
+        prompt_ids: list[int],
+        sampling_params: dict[str, any],
+        request_id: str,
+        image_data: list[any] | None = None,
+    ) -> list[int]:
+        ret = await self.rollout.generate(prompt_ids, sampling_params, request_id, image_data=image_data)
+        return ret

@@ -94,16 +94,36 @@ class TaskRunner:
             assert config.critic.strategy in {"fsdp", "fsdp2"}
 
             # Use FlowRL custom worker instead of standard worker
-            from recipe.flowrl.flowrl_fsdp_worker import FlowRLActorRolloutRefWorker
-            from verl.workers.fsdp_workers import CriticWorker  # , ActorRolloutRefWorker
+            # For async rollout mode, use FlowRLAsyncActorRolloutRefWorker
+            from recipe.flowrl.flowrl_fsdp_worker import (
+                FlowRLActorRolloutRefWorker,
+                FlowRLAsyncActorRolloutRefWorker,
+            )
+            from verl.workers.fsdp_workers import CriticWorker
 
-            ActorRolloutRefWorker = FlowRLActorRolloutRefWorker
+            ActorRolloutRefWorker = (
+                FlowRLAsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else FlowRLActorRolloutRefWorker
+            )
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, CriticWorker
 
+            # Use FlowRL custom megatron worker instead of standard worker
+            # For async rollout mode, use FlowRLAsyncActorRolloutRefWorker
+            from recipe.flowrl.flowrl_megatron_worker import (
+                FlowRLActorRolloutRefWorker as MegatronFlowRLActorRolloutRefWorker,
+                FlowRLAsyncActorRolloutRefWorker as MegatronFlowRLAsyncActorRolloutRefWorker,
+            )
+            from verl.workers.megatron_workers import CriticWorker
+
+            ActorRolloutRefWorker = (
+                MegatronFlowRLAsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else MegatronFlowRLActorRolloutRefWorker
+            )
             ray_worker_group_cls = RayWorkerGroup
 
         else:
