@@ -129,3 +129,8 @@ logs
 log
 outputs
 .history
+
+dataset/
+logs/
+ckpts/
+copilot-instructions.md
