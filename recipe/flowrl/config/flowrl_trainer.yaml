@@ -31,3 +31,21 @@ algorithm:
 
 trainer:
   project_name: verl-flowrl
+
+# MoE Expert Routing Metrics Configuration
+# These settings control the collection and logging of MoE expert routing distribution metrics
+# which help monitor expert load balance during training and detect routing collapse issues
+actor_rollout_ref:
+  actor:
+    # Enable MoE routing metrics collection during training
+    # - null (default): Auto-detect based on model type (enabled for MoE, disabled for dense)
+    # - true: Force enable (will only work for MoE models)
+    # - false: Force disable
+    # When enabled, metrics like expert_load_entropy, expert_utilization_ratio, load_balance_loss
+    # will be collected and logged to wandb
+    collect_moe_metrics: null
+    
+    # Number of experts selected per token (top-k)
+    # This is auto-detected from model config for MoE models
+    # Only used as fallback if auto-detection fails
+    moe_top_k: 8

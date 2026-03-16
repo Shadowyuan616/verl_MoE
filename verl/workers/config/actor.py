@@ -163,6 +163,12 @@ class ActorConfig(BaseConfig):
     model_config: HFModelConfig = field(default_factory=BaseConfig)
     router_replay: RouterReplayConfig = field(default_factory=RouterReplayConfig)
 
+    # MoE Expert Routing Metrics Configuration
+    # Controls the collection and logging of MoE expert routing distribution metrics
+    # which help monitor expert load balance during training and detect routing collapse issues
+    collect_moe_metrics: Optional[bool] = None  # None = auto-detect, True = force enable, False = disable
+    moe_top_k: int = 8  # Number of experts selected per token, auto-detected from model config
+
     # Store global batch info for loss aggregation:
     # dp_size: data parallel size
     # batch_num_tokens: number of valid tokens in global batch

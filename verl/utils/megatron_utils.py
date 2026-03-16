@@ -180,9 +180,12 @@ def make_megatron_module(
     override_ddp_config: dict[str, Any] = None,
     peft_cls: Any = None,
     peft_config: Any = None,
+    post_model_creation_callbacks: list[Any] | None = None,
 ):
     if override_model_config is None:
         override_model_config = {}
+    if post_model_creation_callbacks is None:
+        post_model_creation_callbacks = []
 
     if bridge is not None:
         if provider is None:
@@ -197,11 +200,12 @@ def make_megatron_module(
             )
             value_model_hook = make_value_model(hidden_size, provider.sequence_parallel)
 
-        post_model_creation_callbacks = []
+        callbacks = []
         if wrap_config.is_value_model:
-            post_model_creation_callbacks.append(value_model_hook)
+            callbacks.append(value_model_hook)
         if override_model_config.get("moe_config", {}).get("freeze_moe_router", False):
-            post_model_creation_callbacks.append(freeze_moe_router)
+            callbacks.append(freeze_moe_router)
+        callbacks.extend(post_model_creation_callbacks)
         if provider is not None:
             # When using PEFT with Megatron-Bridge, we must apply PEFT transformation
             # BEFORE wrapping the model in DDP. This is required because:
@@ -239,7 +243,7 @@ def make_megatron_module(
                 provider.register_pre_wrap_hook(peft_pre_wrap_hook)
 
             # Register post-creation callbacks (make_value_model, freeze_moe_router) as pre-wrap hooks
-            for callback in post_model_creation_callbacks:
+            for callback in callbacks:
                 provider.register_pre_wrap_hook(callback)
 
             # Create DDP config if needed
@@ -268,7 +272,7 @@ def make_megatron_module(
             tf_config = get_model_config(model[0] if isinstance(model, list) else model)
         else:
             model = bridge.get_model(
-                post_model_creation_callbacks=post_model_creation_callbacks,
+                post_model_creation_callbacks=callbacks,
                 wrap_with_ddp=wrap_config.wrap_with_ddp,
                 fp16=tf_config.fp16,
                 bf16=tf_config.bf16,
@@ -289,6 +293,8 @@ def make_megatron_module(
                 freeze_moe_router=override_model_config.get("moe_config", {}).get("freeze_moe_router", False),
                 vp_stage=vp_stage,
             )
+            for callback in post_model_creation_callbacks:
+                callback(parallel_model)
             parallel_model.to(get_device_name())
             return parallel_model
 
