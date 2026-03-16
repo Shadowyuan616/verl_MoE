@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
+JOB_ID=${SLURM_JOB_ID:-"local_run"}
+JOB_NAME=${SLURM_JOB_NAME:-"experiment"}
+
 project_name='FlowRL'
 timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
@@ -31,21 +34,11 @@ train_prompt_bsz=256
 gen_prompt_bsz=$((train_prompt_bsz * 1))
 n_resp_per_prompt=8
 train_prompt_mini_bsz=64
+# train_ppo_micro_batch_size_per_gpu=4
+# infer_ppo_micro_batch_size_per_gpu=4
 
 # Checkpoint saving frequency (-1 to disable periodic saves)
-save_freq=-1
-
-# Ray
-# RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
-WORKING_DIR=${WORKING_DIR:-"${PWD}"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
-NNODES=${NNODES:-2}
-
-# Paths
-MODEL_PATH=${MODEL_PATH:-"/data/public/Qwen/Qwen2.5-7B"}
-CKPTS_DIR=${CKPTS_DIR:-"${WORKING_DIR}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${WORKING_DIR}/dataset/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"${WORKING_DIR}/dataset/aime-2024.parquet"}
+save_freq=50
 
 # Sampling
 temperature=1.0
@@ -55,12 +48,13 @@ val_top_p=0.7
 
 # Performance Related Parameter
 n_gpus=8
-sp_size=1
+
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=False
-# gen_tp=1
+
+sp_size=1
 
 COMMON_PP=${COMMON_PP:-1}
 COMMON_VPP=${COMMON_VPP:-null}
@@ -98,9 +92,23 @@ RM_TP=${RM_TP:-$TRAIN_TP}
 RM_EP=${RM_EP:-$COMMON_EP}
 RM_ETP=${RM_ETP:-$COMMON_ETP}
 
-exp_name=DAPO-FlowRL-Qwen2_5-7B-MATH-fsdp-Node${NNODES}_bs${train_prompt_bsz}_${COMMON_PP}${COMMON_TP}${COMMON_EP}${COMMON_ETP}_${INFER_TP}_minbs${train_prompt_mini_bsz}
+exp_name=DAPO-FlowRL-Qwen3-8B-MATH-fsdp-Node${NNODES}_bs${train_prompt_bsz}_${COMMON_PP}${COMMON_TP}${COMMON_EP}${COMMON_ETP}_${INFER_TP}_minbs${train_prompt_mini_bsz}
 
-python3 -m recipe.flowrl.main_flowrl \
+# Ray
+# RAY_ADDRESS=${RAY_ADDRESS:-"http://localhost:8265"}
+WORKING_DIR=${WORKING_DIR:-"${PWD}"}
+RUNTIME_ENV=${RUNTIME_ENV:-"${WORKING_DIR}/verl/trainer/runtime_env.yaml"}
+NNODES=${NNODES:-2}
+
+# Paths
+MODEL_PATH=${MODEL_PATH:-"/data/public/Qwen/Qwen3-8B"}
+CKPTS_DIR=${CKPTS_DIR:-"${WORKING_DIR}/ckpts/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"${WORKING_DIR}/dataset/dapo-math-17k.parquet"}
+TEST_FILE=${TEST_FILE:-"${WORKING_DIR}/dataset/aime-2024.parquet"}
+
+    # actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${infer_ppo_micro_batch_size_per_gpu} \
+    # actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${train_ppo_micro_batch_size_per_gpu} \
+python -m recipe.flowrl.main_flowrl \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -109,6 +117,7 @@ python3 -m recipe.flowrl.main_flowrl \
     data.max_response_length=${max_response_length} \
     data.gen_batch_size=${gen_prompt_bsz} \
     data.train_batch_size=${train_prompt_bsz} \
+    +data.apply_chat_template_kwargs='{enable_thinking:false}' \
     actor_rollout_ref.rollout.n=${n_resp_per_prompt} \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
@@ -138,7 +147,7 @@ python3 -m recipe.flowrl.main_flowrl \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${INFER_TP} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -151,6 +160,9 @@ python3 -m recipe.flowrl.main_flowrl \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.mode=async \
+    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
@@ -168,4 +180,4 @@ python3 -m recipe.flowrl.main_flowrl \
     trainer.save_freq=${save_freq} \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto 2>&1 | tee ${WORKING_DIR}/logs/${timestamp}_${exp_name}.log
+    trainer.resume_mode=auto 2>&1 | tee ${WORKING_DIR}/logs/${JOB_NAME}_${JOB_ID}/${timestamp}_${exp_name}.log
