@@ -1,7 +1,8 @@
 set -x
+timestamp=$(date +"%Y-%m-%d-%H:%M:%S")""
 
 # tested in NNODES=1~4 * 96G H20 GPU
-NNODES=${NNODES:-1}
+NNODES=${NNODES:-2}
 NGPUS_PER_NODES=${NGPUS_PER_NODES:-8}
 
 project_name='DAPO-Qwen3-30b-MATH'
@@ -30,12 +31,12 @@ train_prompt_mini_bsz=128
 train_ppo_micro_batch_size_per_gpu=2
 infer_ppo_micro_batch_size_per_gpu=2
 # Paths
-MODEL_PATH=Qwen/Qwen3-30B-A3B-Base
+MODEL_PATH=/data/public/Qwen/Qwen3-30B-A3B
 
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/code/verl_MoE"}
 TRAIN_FILE=$RAY_DATA_HOME/dataset/dapo-math-17k.parquet
 TEST_FILE=$RAY_DATA_HOME/dataset/aime-2024.parquet
-TEST_FILE="['$aime24_test_path']"
+# TEST_FILE="['$aime24_test_path']"
 
 # Algorithm
 temperature=1.0
@@ -92,7 +93,7 @@ RM_ETP=${RM_ETP:-$COMMON_ETP}
 USE_MBRIDGE=True
 USE_DIST_CKPT=False
 
-python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
+python -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megatron_trainer'\
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -144,9 +145,12 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="flex" \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="alltoall" \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_enable_deepep=False \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity='full' \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method='uniform' \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${infer_ppo_micro_batch_size_per_gpu} \
@@ -164,6 +168,7 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
     actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${infer_ppo_micro_batch_size_per_gpu} \
@@ -192,4 +197,4 @@ python3 -m verl.trainer.main_ppo --config-path=./config --config-name='ppo_megat
     trainer.save_freq=100 \
     trainer.total_epochs=10 \
     trainer.resume_mode=auto \
-    trainer.log_val_generations=10
+    trainer.log_val_generations=10 2>&1 | tee ${RAY_DATA_HOME}/logs/${timestamp}_${exp_name}.log
