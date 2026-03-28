@@ -69,4 +69,4 @@ actor_rollout_ref.actor.router_replay.mode="R3"
 actor_rollout_ref.rollout.enable_rollout_routing_replay=True
 ```
 
-R3 mode requires the rollout backend to support returning router selection results. Currently, this functionality is being tested based on the vllm implementation at https://github.com/vllm-project/vllm/pull/28284.
+R3 mode requires the rollout backend to support returning router selection results. Currently, this functionality is being tested based on the vllm implementation at https://github.com/vllm-project/vllm/pull/28284 as well as bug fix at https://github.com/vllm-project/vllm/pull/33013.
